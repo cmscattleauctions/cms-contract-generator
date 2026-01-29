@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>CMS Contract Generator</title>
 
-  <!-- Local libs (as you already have) -->
+  <!-- Local libs (must match /lib filenames exactly; GitHub Pages is case-sensitive) -->
   <script defer src="./lib/papa.min.js"></script>
   <script defer src="./lib/pizzip.min.js"></script>
   <script defer src="./lib/docxtemplater.min.js"></script>
@@ -217,7 +217,7 @@
   <div id="pinOverlay" class="pin-overlay">
     <div class="pin-card">
       <p class="pin-title">Enter PIN</p>
-      <p class="pin-sub">This tool is client-side. Uploads stay in your browser for this session only.</p>
+      <p class="pin-sub">This tool runs client-side. Your CSV + templates stay in your browser for this session only.</p>
       <input id="pinInput" class="pin-input" inputmode="numeric" autocomplete="one-time-code" placeholder="••••" maxlength="8" />
       <div id="pinErr" class="pin-err">Incorrect PIN. Try again.</div>
       <div class="pin-actions">
@@ -231,7 +231,7 @@
     <div class="topbar">
       <div class="h-left">
         <div class="brand">CMS Contract Generator</div>
-        <div class="sub">Upload CSV + buyer/seller DOCX templates → generate editable contracts → download by lot or ZIP.</div>
+        <div class="sub">Upload CSV + Buyer/Seller DOCX templates → generate editable contracts → download by lot or ZIP.</div>
       </div>
       <div class="h-right">
         <span class="pill" id="sessionPill">Locked</span>
@@ -293,7 +293,7 @@
         </div>
 
         <div class="hint">
-          <b>Two-step flow:</b> Generate builds contracts in memory first. Then you can download by lot or ZIP (Buyer-only, Seller-only, or All).
+          <b>Two-step flow:</b> Generate builds contracts in memory first. Then you can download lot-by-lot or ZIP (Buyer-only, Seller-only, or All).
           Templates are required every session and are <b>not</b> stored on GitHub.
         </div>
       </div>
@@ -321,9 +321,7 @@
           <label><input id="onlyWithConsignor" type="checkbox" /> Only lots with Consignor</label>
         </div>
 
-        <div id="resultsBox" class="lotlist" style="margin-top:10px;">
-          <!-- rows injected -->
-        </div>
+        <div id="resultsBox" class="lotlist" style="margin-top:10px;"></div>
 
         <div class="hint">
           Lot-by-lot buttons download individual DOCX files immediately. ZIP buttons include <b>selected</b> lots (or all if none selected).
