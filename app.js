@@ -6,13 +6,19 @@
        * Lot-by-lot download (buyer only / seller only)
        * ZIP downloads: buyer-only, seller-only, or all (buyer+seller)
        * ZIP includes selected lots (or all if none selected)
+
+   CSV “Parsing…” hardening:
+   - Verifies Papa is loaded (otherwise shows clear error)
+   - Try/catch around parse
+   - worker:true to avoid UI lockup
+   - 10s watchdog that errors if Papa never calls back
 */
 
 (() => {
   const CONFIG = {
     PIN: "0623",
 
-    // CSV headers (must match exactly; we validate these)
+    // Required headers (exact match). We validate these.
     REQUIRED_COLS: [
       "Contract #",
       "Consignor",
@@ -20,7 +26,7 @@
       "Lot Number #2"
     ],
 
-    // Full mapping: DOCX placeholder -> CSV column
+    // DOCX placeholder -> CSV column
     MAP: {
       contract_no: "Contract #",
       consignor: "Consignor",
@@ -41,9 +47,9 @@
       down_money_due: "Down Money Due"
     },
 
-    // Column fallbacks (optional): if a preferred column is empty, try a fallback
+    // Optional fallbacks if a preferred column is empty
     FALLBACKS: {
-      lot_no: ["Lot Number", "Lot Number #2"],
+      lot_no: ["Lot Number #2", "Lot Number"],
       price_cwt: ["Calculated High Bid"]
     }
   };
@@ -92,18 +98,14 @@
   const state = {
     csvFile: null,
     csvRowsRaw: [],
-    rows: [], // normalized rows for generation
     buyerTplFile: null,
     sellerTplFile: null,
     buyerTplBuf: null,
     sellerTplBuf: null,
-
-    // Generated outputs
-    // lots: [{ id, contractNo, lotNo, buyerName, consignorName, buyerDoc: Blob|null, sellerDoc: Blob|null, buyerFilename, sellerFilename }]
-    lots: [],
+    lots: [] // generated
   };
 
-  // ---------- Utilities ----------
+  // ---------- UI helpers ----------
   function setStatus(type, msg, show = true) {
     if (!show) {
       validationBox.style.display = "none";
@@ -124,6 +126,15 @@
       .trim();
   }
 
+  function escapeHtml(str) {
+    return String(str || "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
   function getCell(row, colName) {
     if (!row || !colName) return "";
     const v = row[colName];
@@ -131,43 +142,14 @@
   }
 
   function moneyClean(v) {
-    // Remove $ and commas; keep decimals
     if (v === undefined || v === null) return "";
     const s = String(v).trim();
     if (!s) return "";
     return s.replace(/\$/g, "").replace(/,/g, "").trim();
   }
 
-  function normalizeData(row) {
-    // Build the object that will be passed into docxtemplater
-    const data = {};
-
-    // Base mapping
-    for (const [key, col] of Object.entries(CONFIG.MAP)) {
-      let val = getCell(row, col);
-
-      // Fallbacks if empty
-      if (!val && CONFIG.FALLBACKS[key]) {
-        for (const altCol of CONFIG.FALLBACKS[key]) {
-          val = getCell(row, altCol);
-          if (val) break;
-        }
-      }
-
-      // special cleaning
-      if (key === "price_cwt" || key === "down_money_due") val = moneyClean(val);
-
-      data[key] = val;
-    }
-
-    // Compatibility: support both {location} and {Location} placeholders
-    data.Location = data.location;
-
-    return data;
-  }
-
   function requiredMissing(headers) {
-    const set = new Set(headers.map(h => String(h).trim()));
+    const set = new Set((headers || []).map(h => String(h).trim()));
     return CONFIG.REQUIRED_COLS.filter(req => !set.has(req));
   }
 
@@ -185,7 +167,7 @@
     zipAllBtn.disabled = !enabled;
   }
 
-  // ---------- PIN Gate ----------
+  // ---------- PIN ----------
   function isUnlocked() {
     return sessionStorage.getItem("cms_pin_ok") === "1";
   }
@@ -204,11 +186,8 @@
 
   pinUnlockBtn.addEventListener("click", () => {
     const v = (pinInput.value || "").trim();
-    if (v === CONFIG.PIN) {
-      unlock();
-    } else {
-      pinErr.style.display = "block";
-    }
+    if (v === CONFIG.PIN) unlock();
+    else pinErr.style.display = "block";
   });
   pinClearBtn.addEventListener("click", () => {
     pinInput.value = "";
@@ -220,12 +199,11 @@
   });
 
   exitBtn.addEventListener("click", () => {
-    // clear everything
     clearSessionFiles(true);
     lock();
   });
 
-  // ---------- Drag & drop helpers ----------
+  // ---------- Drag/drop ----------
   function wireDropzone(zoneEl, inputEl, onFiles) {
     zoneEl.addEventListener("dragover", (e) => {
       e.preventDefault();
@@ -247,6 +225,17 @@
   }
 
   // ---------- CSV ----------
+  function assertLibsForCsv() {
+    if (typeof Papa === "undefined") {
+      throw new Error(
+        "PapaParse is not loaded (Papa is undefined).\n\n" +
+        "Fix:\n" +
+        "1) In GitHub, confirm /lib/papa.min.js exists and is named EXACTLY that (case-sensitive).\n" +
+        "2) On the live site, open DevTools → Network → refresh and confirm /lib/papa.min.js returns 200 (not 404).\n"
+      );
+    }
+  }
+
   async function handleCsv(files) {
     const f = files[0];
     if (!f) return;
@@ -256,38 +245,82 @@
 
     setStatus("warn", "Parsing CSV…");
 
-    Papa.parse(f, {
-      header: true,
-      skipEmptyLines: true,
-      complete: (res) => {
-        const data = res.data || [];
-        const headers = res.meta?.fields || Object.keys(data[0] || {});
-        const missing = requiredMissing(headers);
+    // Watchdog: if Papa never calls complete/error, we break out with a clear message.
+    let watchdog = null;
+    const WATCHDOG_MS = 10000;
 
-        state.csvRowsRaw = data;
+    try {
+      assertLibsForCsv();
 
-        if (!data.length) {
-          setStatus("bad", "CSV parsed, but there are zero rows.");
-          state.csvRowsRaw = [];
-          setGenerateEnabled();
-          renderLots([]);
-          return;
-        }
+      // Clear existing rows before parsing
+      state.csvRowsRaw = [];
+      setGenerateEnabled();
+      setDownloadEnabled(false);
+      renderLots([]);
 
-        if (missing.length) {
-          setStatus("bad", `CSV is missing required columns:\n- ${missing.join("\n- ")}\n\nFound columns:\n- ${headers.join("\n- ")}`);
-        } else {
-          setStatus("ok", `CSV loaded.\nRows: ${data.length}\nColumns: ${headers.length}`);
-        }
+      await new Promise((resolve, reject) => {
+        let finished = false;
 
-        setGenerateEnabled();
-      },
-      error: (err) => {
-        setStatus("bad", `CSV parse error: ${err?.message || err}`);
-        state.csvRowsRaw = [];
-        setGenerateEnabled();
-      }
-    });
+        watchdog = setTimeout(() => {
+          if (!finished) {
+            reject(new Error(
+              "CSV parse timed out.\n\n" +
+              "Most common causes:\n" +
+              "- /lib/papa.min.js did not load (404/case mismatch)\n" +
+              "- A JS error occurred before Papa completed\n" +
+              "- Opening the page as a local file instead of GitHub Pages\n\n" +
+              "Check DevTools Console + Network."
+            ));
+          }
+        }, WATCHDOG_MS);
+
+        Papa.parse(f, {
+          header: true,
+          skipEmptyLines: true,
+          worker: true,
+          complete: (res) => {
+            finished = true;
+            clearTimeout(watchdog);
+
+            const data = res.data || [];
+            const headers = res.meta?.fields || Object.keys(data[0] || {});
+            const missing = requiredMissing(headers);
+
+            state.csvRowsRaw = data;
+
+            if (!data.length) {
+              setStatus("bad", "CSV parsed, but there are zero rows.");
+              state.csvRowsRaw = [];
+              setGenerateEnabled();
+              resolve();
+              return;
+            }
+
+            if (missing.length) {
+              setStatus("bad",
+                `CSV is missing required columns:\n- ${missing.join("\n- ")}\n\nFound columns:\n- ${headers.join("\n- ")}`
+              );
+            } else {
+              setStatus("ok", `CSV loaded.\nRows: ${data.length}\nColumns: ${headers.length}`);
+            }
+
+            setGenerateEnabled();
+            resolve();
+          },
+          error: (err) => {
+            finished = true;
+            clearTimeout(watchdog);
+            reject(new Error(err?.message || String(err)));
+          }
+        });
+      });
+
+    } catch (e) {
+      if (watchdog) clearTimeout(watchdog);
+      setStatus("bad", `CSV parse failed:\n${e?.message || e}`);
+      state.csvRowsRaw = [];
+      setGenerateEnabled();
+    }
   }
 
   // ---------- Templates ----------
@@ -306,7 +339,7 @@
       setStatus("ok", "Buyer template loaded.");
     } catch (e) {
       state.buyerTplBuf = null;
-      setStatus("bad", `Buyer template load failed: ${e?.message || e}`);
+      setStatus("bad", `Buyer template load failed:\n${e?.message || e}`);
     }
     setGenerateEnabled();
   }
@@ -322,14 +355,48 @@
       setStatus("ok", "Seller template loaded.");
     } catch (e) {
       state.sellerTplBuf = null;
-      setStatus("bad", `Seller template load failed: ${e?.message || e}`);
+      setStatus("bad", `Seller template load failed:\n${e?.message || e}`);
     }
     setGenerateEnabled();
   }
 
+  // ---------- DOCX data prep ----------
+  function normalizeData(row) {
+    const data = {};
+
+    for (const [key, col] of Object.entries(CONFIG.MAP)) {
+      let val = getCell(row, col);
+
+      if (!val && CONFIG.FALLBACKS[key]) {
+        for (const alt of CONFIG.FALLBACKS[key]) {
+          val = getCell(row, alt);
+          if (val) break;
+        }
+      }
+
+      if (key === "price_cwt" || key === "down_money_due") val = moneyClean(val);
+      data[key] = val;
+    }
+
+    // Compatibility: support both {location} and {Location}
+    data.Location = data.location;
+
+    return data;
+  }
+
   // ---------- DOCX generation ----------
+  function assertLibsForDocx() {
+    if (typeof PizZip === "undefined") {
+      throw new Error("PizZip is not loaded. Check /lib/pizzip.min.js path/case.");
+    }
+    if (typeof window.docxtemplater === "undefined") {
+      throw new Error("docxtemplater is not loaded. Check /lib/docxtemplater.min.js path/case.");
+    }
+  }
+
   function renderDocx(templateArrayBuffer, data) {
-    // pizzip expects binary string/uint8; arrayBuffer is okay when wrapped
+    assertLibsForDocx();
+
     const zip = new PizZip(templateArrayBuffer);
     const doc = new window.docxtemplater(zip, {
       paragraphLoop: true,
@@ -341,25 +408,22 @@
     try {
       doc.render();
     } catch (error) {
-      // Give useful docxtemplater error output
       const e = error;
       const explanation =
         (e.properties && e.properties.errors)
           ? e.properties.errors.map(er => er.properties?.explanation).filter(Boolean).join("\n")
           : (e.message || String(e));
 
-      throw new Error(`Template render failed.\n${explanation}`);
+      throw new Error(`Template render failed:\n${explanation}`);
     }
 
-    const out = doc.getZip().generate({
+    return doc.getZip().generate({
       type: "blob",
       mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     });
-
-    return out;
   }
 
-  // ---------- Generation pipeline ----------
+  // ---------- Build lots ----------
   function buildLotsFromCsv() {
     const lots = [];
     const rows = state.csvRowsRaw;
@@ -372,7 +436,7 @@
       const buyerName = getCell(r, "Buyer");
       const consignorName = getCell(r, "Consignor");
 
-      // Skip rows that are totally empty
+      // Skip totally empty lines
       if (!contractNo && !lotNo && !buyerName && !consignorName) continue;
 
       const sellerFilename = sanitizeFilename(`${consignorName || "Consignor"}-${contractNo || "Contract"}.docx`);
@@ -386,15 +450,10 @@
         buyerName,
         consignorName,
         selected: false,
-
-        // Generated docs
         buyerDoc: null,
         sellerDoc: null,
-
         buyerFilename,
         sellerFilename,
-
-        // Data object used for rendering
         data: normalizeData(r)
       });
     }
@@ -402,11 +461,11 @@
     return lots;
   }
 
+  // ---------- Generate ----------
   async function generateAll() {
     if (!canGenerate()) return;
 
-    // Validate required columns present before generating
-    // (We already did basic check, but enforce hard stop if missing)
+    // enforce required columns exist
     const headers = Object.keys(state.csvRowsRaw[0] || {});
     const missing = requiredMissing(headers);
     if (missing.length) {
@@ -419,6 +478,7 @@
     const lots = buildLotsFromCsv();
     if (!lots.length) {
       setStatus("bad", "No usable rows found to generate.");
+      state.lots = [];
       renderLots([]);
       setDownloadEnabled(false);
       return;
@@ -427,21 +487,14 @@
     let ok = 0;
     const errors = [];
 
-    // Generate sequentially to keep memory stable (and better error messages)
     for (let i = 0; i < lots.length; i++) {
       const lot = lots[i];
-
       try {
-        // Buyer
         lot.buyerDoc = renderDocx(state.buyerTplBuf, lot.data);
-
-        // Seller
         lot.sellerDoc = renderDocx(state.sellerTplBuf, lot.data);
-
         ok++;
       } catch (e) {
         errors.push(`Row ${lot.idx} (Contract # ${lot.contractNo || "?"}, Lot ${lot.lotNo || "?"}): ${e.message || e}`);
-        // continue generating other lots
       }
     }
 
@@ -450,7 +503,10 @@
     setDownloadEnabled(ok > 0);
 
     if (errors.length) {
-      setStatus("warn", `Generated ${ok} / ${lots.length} lots.\n\nErrors:\n- ${errors.slice(0, 12).join("\n- ")}${errors.length > 12 ? `\n…plus ${errors.length - 12} more` : ""}`);
+      setStatus(
+        "warn",
+        `Generated ${ok} / ${lots.length} lots.\n\nErrors:\n- ${errors.slice(0, 12).join("\n- ")}${errors.length > 12 ? `\n…plus ${errors.length - 12} more` : ""}`
+      );
     } else {
       setStatus("ok", `Generated ${ok} / ${lots.length} lots.\nYou can now download lot-by-lot or ZIP.`);
     }
@@ -459,15 +515,21 @@
   // ---------- Results UI ----------
   function getFilteredLots() {
     let lots = [...state.lots];
-
-    if (onlyWithBuyer.checked) {
-      lots = lots.filter(l => (l.buyerName || "").trim().length > 0);
-    }
-    if (onlyWithConsignor.checked) {
-      lots = lots.filter(l => (l.consignorName || "").trim().length > 0);
-    }
-
+    if (onlyWithBuyer.checked) lots = lots.filter(l => (l.buyerName || "").trim().length > 0);
+    if (onlyWithConsignor.checked) lots = lots.filter(l => (l.consignorName || "").trim().length > 0);
     return lots;
+  }
+
+  function syncSelectAllCheckbox() {
+    const visible = getFilteredLots();
+    if (!visible.length) {
+      selectAll.checked = false;
+      selectAll.indeterminate = false;
+      return;
+    }
+    const selectedCount = visible.filter(l => l.selected).length;
+    selectAll.checked = selectedCount === visible.length;
+    selectAll.indeterminate = selectedCount > 0 && selectedCount < visible.length;
   }
 
   function renderLots(lotsInput) {
@@ -524,7 +586,6 @@
 
     resultsBox.innerHTML = html;
 
-    // wire events
     resultsBox.querySelectorAll(".lotSelect").forEach(cb => {
       cb.addEventListener("change", (e) => {
         const id = e.target.getAttribute("data-id");
@@ -549,27 +610,6 @@
     syncSelectAllCheckbox();
   }
 
-  function escapeHtml(str) {
-    return String(str || "")
-      .replaceAll("&","&amp;")
-      .replaceAll("<","&lt;")
-      .replaceAll(">","&gt;")
-      .replaceAll('"',"&quot;")
-      .replaceAll("'","&#039;");
-  }
-
-  function syncSelectAllCheckbox() {
-    const visible = getFilteredLots();
-    if (!visible.length) {
-      selectAll.checked = false;
-      selectAll.indeterminate = false;
-      return;
-    }
-    const selectedCount = visible.filter(l => l.selected).length;
-    selectAll.checked = selectedCount === visible.length;
-    selectAll.indeterminate = selectedCount > 0 && selectedCount < visible.length;
-  }
-
   selectAll.addEventListener("change", () => {
     const visible = getFilteredLots();
     visible.forEach(l => l.selected = selectAll.checked);
@@ -579,7 +619,7 @@
   onlyWithBuyer.addEventListener("change", () => renderLots(state.lots));
   onlyWithConsignor.addEventListener("change", () => renderLots(state.lots));
 
-  // ---------- Download helpers ----------
+  // ---------- Downloads ----------
   function selectedOrAllLots() {
     const selected = state.lots.filter(l => l.selected);
     return selected.length ? selected : state.lots;
@@ -597,6 +637,15 @@
 
   async function downloadZip(mode) {
     // mode: "buyer" | "seller" | "all"
+    if (typeof JSZip === "undefined") {
+      setStatus("bad", "JSZip is not loaded. Check /lib/jszip.min.js path/case.");
+      return;
+    }
+    if (typeof saveAs === "undefined") {
+      setStatus("bad", "FileSaver (saveAs) is not loaded. Check /lib/FileSaver.min.js path/case.");
+      return;
+    }
+
     const lots = selectedOrAllLots().filter(l => {
       if (mode === "buyer") return !!l.buyerDoc;
       if (mode === "seller") return !!l.sellerDoc;
@@ -629,7 +678,6 @@
       }
     }
 
-    // If mode is buyer-only, remove seller folder if empty; same for seller-only
     if (mode === "buyer") zip.remove("Seller Contracts");
     if (mode === "seller") zip.remove("Buyer Contracts");
 
@@ -648,11 +696,10 @@
   zipSellerBtn.addEventListener("click", () => downloadZip("seller"));
   zipAllBtn.addEventListener("click", () => downloadZip("all"));
 
-  // ---------- Clear session ----------
+  // ---------- Clear ----------
   function clearSessionFiles(silent=false) {
     state.csvFile = null;
     state.csvRowsRaw = [];
-    state.rows = [];
 
     state.buyerTplFile = null;
     state.sellerTplFile = null;
@@ -683,7 +730,7 @@
   wireDropzone(dzBuyerTpl, buyerTplInput, handleBuyerTpl);
   wireDropzone(dzSellerTpl, sellerTplInput, handleSellerTpl);
 
-  // ---------- Generate ----------
+  // ---------- Generate button ----------
   generateBtn.addEventListener("click", generateAll);
 
   // ---------- Init ----------
@@ -692,11 +739,44 @@
     setDownloadEnabled(false);
     setGenerateEnabled();
 
-    if (isUnlocked()) {
-      unlock();
-    } else {
-      lock();
+    if (isUnlocked()) unlock();
+    else lock();
+
+    // Extra: show if libs are missing immediately (helps catch 404)
+    const missing = [];
+    if (typeof Papa === "undefined") missing.push("PapaParse (Papa) missing");
+    if (typeof PizZip === "undefined") missing.push("PizZip missing");
+    if (typeof window.docxtemplater === "undefined") missing.push("docxtemplater missing");
+    if (typeof JSZip === "undefined") missing.push("JSZip missing");
+    if (typeof saveAs === "undefined") missing.push("FileSaver (saveAs) missing");
+
+    if (missing.length) {
+      setStatus(
+        "warn",
+        "One or more libraries did not load:\n- " + missing.join("\n- ") +
+        "\n\nOpen DevTools → Network and confirm /lib/*.js files return 200 (not 404)."
+      );
     }
+  }
+
+  function wireDropzone(zoneEl, inputEl, onFiles) {
+    zoneEl.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      zoneEl.style.borderColor = "rgba(51,102,153,.75)";
+    });
+    zoneEl.addEventListener("dragleave", () => {
+      zoneEl.style.borderColor = "rgba(51,102,153,.35)";
+    });
+    zoneEl.addEventListener("drop", (e) => {
+      e.preventDefault();
+      zoneEl.style.borderColor = "rgba(51,102,153,.35)";
+      const files = e.dataTransfer?.files;
+      if (files && files.length) onFiles(files);
+    });
+    inputEl.addEventListener("change", () => {
+      const files = inputEl.files;
+      if (files && files.length) onFiles(files);
+    });
   }
 
   init();
