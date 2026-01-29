@@ -8,29 +8,30 @@
   <style>
     :root{
       --cms:#336699;
-      --bg:#f7f9fc;
+      --bg:#f6f8fb;
       --card:#ffffff;
-      --muted:#6b7280;
+      --text:#0f172a;
+      --muted:#64748b;
       --border:#dbe3ef;
       --soft:#eef2f7;
       --danger:#b91c1c;
       --ok:#065f46;
       --warn:#92400e;
     }
-    *{box-sizing:border-box}
+    *{ box-sizing:border-box; }
     body{
       margin:0;
-      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
       background:var(--bg);
-      color:#111827;
+      color:var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
     }
-    header{
-      background:linear-gradient(90deg, var(--cms), #2b577f);
-      color:white;
-      padding:16px 18px;
-      box-shadow:0 4px 18px rgba(0,0,0,.08);
+    .topbar{
+      background: linear-gradient(90deg, var(--cms), #2b577f);
+      color:#fff;
+      padding:14px 16px;
+      box-shadow:0 4px 18px rgba(0,0,0,.10);
     }
-    header .wrap{
+    .topbar .wrap{
       max-width:1100px;
       margin:0 auto;
       display:flex;
@@ -40,22 +41,64 @@
     }
     .brand{
       display:flex;
-      flex-direction:column;
+      align-items:center;
+      gap:12px;
+      min-width:0;
+    }
+    .logo{
+      width:40px; height:40px;
+      border-radius:10px;
+      background: rgba(255,255,255,.14);
+      display:grid; place-items:center;
+      font-weight:900;
+      flex:0 0 auto;
+    }
+    .brandtext{ min-width:0; }
+    .brandtext .title{
+      font-size:18px;
+      font-weight:900;
       line-height:1.1;
+      letter-spacing:.2px;
     }
-    .brand .title{ font-size:18px; font-weight:800; letter-spacing:.2px; }
-    .brand .sub{ font-size:12px; opacity:.9; }
+    .brandtext .sub{
+      font-size:12px;
+      opacity:.92;
+      margin-top:2px;
+    }
+    .top-actions{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex:0 0 auto;
+    }
+    button{
+      border:0;
+      background: var(--cms);
+      color:#fff;
+      border-radius:12px;
+      padding:10px 12px;
+      font-weight:900;
+      cursor:pointer;
+    }
+    button.secondary{ background:#0f172a; }
+    button:disabled{ background:#94a3b8; cursor:not-allowed; }
 
-    main{ max-width:1100px; margin:18px auto; padding:0 14px 28px; }
-
-    .grid{
-      display:grid;
-      grid-template-columns: 1fr;
-      gap:14px;
+    main{
+      max-width:1100px;
+      margin:18px auto;
+      padding:0 14px 28px;
     }
-    @media (min-width: 980px){
-      .grid{ grid-template-columns: 1.1fr .9fr; }
+    h1{
+      font-size:22px;
+      margin:0 0 10px;
+      letter-spacing:.2px;
     }
+    h2{
+      font-size:15px;
+      margin:16px 0 10px;
+      letter-spacing:.2px;
+    }
+    .muted{ color:var(--muted); font-size:12px; line-height:1.45; }
     .card{
       background:var(--card);
       border:1px solid var(--border);
@@ -63,68 +106,48 @@
       padding:14px;
       box-shadow:0 8px 22px rgba(16,24,40,.06);
     }
-    .card h2{ margin:0 0 8px; font-size:14px; letter-spacing:.2px; }
-    .muted{ color:var(--muted); font-size:12px; line-height:1.35; }
+    .divider{
+      height:1px;
+      background: var(--border);
+      margin:14px 0;
+    }
 
-    .pin-wrap{
-      max-width:520px;
-      margin:44px auto;
-    }
-    .pin-row{
-      display:flex;
-      gap:8px;
-      margin-top:10px;
-    }
-    input[type="password"], input[type="text"]{
+    .pin-wrap{ max-width:520px; margin:36px auto; }
+    .pin-row{ display:flex; gap:10px; margin-top:10px; }
+    input{
       width:100%;
-      padding:12px 12px;
+      padding:12px;
       border:1px solid var(--border);
       border-radius:12px;
       font-size:15px;
       outline:none;
-      background:white;
+      background:#fff;
     }
-    button{
-      border:0;
-      background:var(--cms);
-      color:white;
-      border-radius:12px;
-      padding:12px 12px;
-      font-weight:800;
-      cursor:pointer;
-      transition:.12s transform ease;
+
+    .grid{
+      display:grid;
+      grid-template-columns:1fr;
+      gap:14px;
     }
-    button:active{ transform:scale(.99); }
-    button.secondary{
-      background:#0f172a;
-    }
-    button:disabled{
-      background:#94a3b8;
-      cursor:not-allowed;
+    @media (min-width: 980px){
+      .grid{ grid-template-columns: 1.25fr .75fr; }
     }
 
     .drop{
       border:2px dashed var(--border);
-      background: #fbfdff;
+      background:#fbfdff;
       border-radius:14px;
       padding:14px;
-      min-height:106px;
+      min-height:110px;
       display:flex;
       align-items:center;
       justify-content:space-between;
       gap:12px;
     }
-    .drop.dragover{
-      border-color: var(--cms);
-      background: #eef6ff;
-    }
-    .drop .left{
-      display:flex;
-      flex-direction:column;
-      gap:4px;
-      min-width:0;
-    }
+    .drop.dragover{ border-color:var(--cms); background:#eef6ff; }
+    .left{ min-width:0; }
     .pill{
+      margin-top:6px;
       display:inline-flex;
       align-items:center;
       gap:8px;
@@ -133,7 +156,6 @@
       border-radius:999px;
       border:1px solid var(--border);
       background:var(--soft);
-      width:fit-content;
       max-width:100%;
       overflow:hidden;
       text-overflow:ellipsis;
@@ -142,14 +164,8 @@
     .pill.ok{ background:#ecfdf5; border-color:#10b98133; color:var(--ok); }
     .pill.bad{ background:#fef2f2; border-color:#ef444433; color:var(--danger); }
     .pill.warn{ background:#fffbeb; border-color:#f59e0b33; color:var(--warn); }
+    .hide{ display:none !important; }
 
-    .actions{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-      margin-top:12px;
-    }
     .status{
       margin-top:12px;
       font-size:12px;
@@ -163,19 +179,9 @@
       max-height:260px;
       overflow:auto;
     }
-
-    .hide{ display:none !important; }
-    .row{ display:flex; gap:10px; flex-wrap:wrap; }
-    .mini{ font-size:11px; opacity:.9; }
-    a.fake{
-      color: var(--cms);
-      font-weight:800;
-      text-decoration:none;
-      cursor:pointer;
-    }
   </style>
 
-  <!-- Libraries (must exist in /lib/) -->
+  <!-- Libraries -->
   <script src="./lib/pizzip.min.js"></script>
   <script src="./lib/docxtemplater.min.js"></script>
   <script src="./lib/jszip.min.js"></script>
@@ -184,105 +190,105 @@
 </head>
 
 <body>
-  <header>
+  <div class="topbar">
     <div class="wrap">
       <div class="brand">
-        <div class="title">CMS Contract Generator</div>
-        <div class="sub">CSV → Buyer + Seller DOCX per lot → ZIP download</div>
+        <div class="logo">CMS</div>
+        <div class="brandtext">
+          <div class="title">CMS Contract Generator</div>
+          <div class="sub">Internal DOCX Builder • CSV → Buyer/Seller contracts → ZIP</div>
+        </div>
       </div>
-      <div class="mini">PIN Protected • Client-only</div>
+      <div class="top-actions">
+        <button id="exitBtn" class="secondary" type="button">Exit / Clear</button>
+      </div>
     </div>
-  </header>
+  </div>
 
   <main>
-    <!-- PIN SCREEN -->
+    <!-- PIN -->
     <section id="pinScreen" class="pin-wrap card">
-      <h2>Enter PIN</h2>
-      <div class="muted">This tool runs entirely in your browser. Files are not uploaded anywhere.</div>
+      <h1>Enter PIN</h1>
+      <div class="muted">Data is processed in your browser only. Nothing is uploaded or stored.</div>
       <div class="pin-row">
-        <input id="pinInput" type="password" placeholder="Enter PIN" autocomplete="one-time-code" />
-        <button id="pinBtn">Unlock</button>
+        <input id="pinInput" type="password" placeholder="PIN" autocomplete="one-time-code" />
+        <button id="pinBtn" type="button">Enter</button>
       </div>
       <div id="pinMsg" class="muted" style="margin-top:10px;"></div>
     </section>
 
-    <!-- APP SCREEN -->
+    <!-- APP -->
     <section id="appScreen" class="hide">
+      <h1>Contract Builder</h1>
+      <div class="muted">Upload the CSV and drop in your Buyer/Seller DOCX templates each time. Then generate a ZIP.</div>
+
+      <div class="divider"></div>
+
       <div class="grid">
         <div class="card">
-          <h2>Uploads</h2>
-          <div class="muted">Drag and drop files below. Templates must be uploaded each time (not hosted on the web).</div>
+          <h2>Upload Files</h2>
 
-          <div style="height:10px"></div>
-
-          <!-- CSV -->
           <div id="dropCsv" class="drop">
             <div class="left">
-              <div><strong>1) Auction Results CSV</strong></div>
-              <div class="muted">Must include headers like <span class="mini">Contract #, Consignor, Buyer, Lot Number #2, Head Count, …</span></div>
+              <div><strong>Upload CSV</strong></div>
+              <div class="muted">Drag & drop CSV here, or choose a file.</div>
               <div id="csvPill" class="pill warn">No CSV loaded</div>
             </div>
-            <div class="right">
+            <div>
               <button id="csvPickBtn" class="secondary" type="button">Choose CSV</button>
-              <input id="csvPicker" type="file" accept=".csv,text/csv" class="hide" />
+              <input id="csvPicker" class="hide" type="file" accept=".csv,text/csv" />
             </div>
           </div>
 
           <div style="height:10px"></div>
 
-          <!-- Buyer template -->
           <div id="dropBuyer" class="drop">
             <div class="left">
-              <div><strong>2) Buyer Contract Template (.docx)</strong></div>
-              <div class="muted">Uses tags like <span class="mini">{{Buyer}}, {{Contract #}}, {{Lot Number #2}}</span></div>
+              <div><strong>Buyer Contract Template (.docx)</strong></div>
+              <div class="muted">Uses tags like <code>{{Buyer}}</code>, <code>{{Contract #}}</code>, etc.</div>
               <div id="buyerPill" class="pill warn">No Buyer template loaded</div>
             </div>
-            <div class="right">
+            <div>
               <button id="buyerPickBtn" class="secondary" type="button">Choose DOCX</button>
-              <input id="buyerPicker" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="hide" />
+              <input id="buyerPicker" class="hide" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
             </div>
           </div>
 
           <div style="height:10px"></div>
 
-          <!-- Seller template -->
           <div id="dropSeller" class="drop">
             <div class="left">
-              <div><strong>3) Seller Contract Template (.docx)</strong></div>
-              <div class="muted">Seller template includes lowercase <span class="mini">{{shrink}}</span> — supported.</div>
+              <div><strong>Seller Contract Template (.docx)</strong></div>
+              <div class="muted">Seller template includes lowercase <code>{{shrink}}</code> — supported.</div>
               <div id="sellerPill" class="pill warn">No Seller template loaded</div>
             </div>
-            <div class="right">
+            <div>
               <button id="sellerPickBtn" class="secondary" type="button">Choose DOCX</button>
-              <input id="sellerPicker" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="hide" />
+              <input id="sellerPicker" class="hide" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
             </div>
           </div>
 
-          <div class="actions">
-            <button id="genBtn" disabled>Generate Contracts ZIP</button>
-            <button id="resetBtn" class="secondary" type="button">Reset</button>
-            <div class="muted">Output: <strong>Buyer + Seller DOCX per row</strong> → ZIP</div>
+          <div style="height:12px"></div>
+
+          <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+            <button id="genBtn" disabled type="button">Generate Contracts ZIP</button>
+            <div class="muted">
+              Naming:
+              <strong>Seller</strong> = Consignor-Contract# •
+              <strong>Buyer</strong> = Contract#-Buyer
+            </div>
           </div>
 
           <div id="status" class="status">Status ready.</div>
         </div>
 
         <div class="card">
-          <h2>Rules</h2>
+          <h2>Notes</h2>
           <ul class="muted" style="margin:8px 0 0 18px;">
-            <li>PIN: <strong>0623</strong></li>
-            <li>Buyer filename: <strong>Contract#-Buyer Name.docx</strong></li>
-            <li>Seller filename: <strong>Consignor Name-Contract#.docx</strong></li>
-            <li>ZIP folders: <strong>Buyer Contracts</strong> and <strong>Seller Contracts</strong></li>
-            <li>Signing happens later in DocuSign (this tool just generates docs).</li>
+            <li>PIN is <strong>0623</strong></li>
+            <li>Templates are uploaded each session (not stored on the web)</li>
+            <li>Signing happens after download via DocuSign</li>
           </ul>
-
-          <div style="height:10px"></div>
-
-          <div class="muted">
-            If you ever see a “template tag not found” error, it means the DOCX template has a tag that doesn’t exist in the CSV headers (or vice-versa).
-            This generator maps CSV headers directly into the DOCX tags.
-          </div>
         </div>
       </div>
     </section>
@@ -291,4 +297,3 @@
   <script src="./app.js"></script>
 </body>
 </html>
-
