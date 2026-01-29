@@ -1,582 +1,702 @@
-/* CMS Contract Generator — FULL app.js (DELETE & REPLACE)
-   - PIN gate: 0623
-   - Upload CSV + Buyer DOCX template + Seller DOCX template EACH SESSION (templates not stored on web)
-   - For each CSV row: generate Buyer + Seller editable DOCX using docxtemplater with {{ }} delimiters
-   - ZIP output:
-       /Buyer Contracts/{Contract#}-{Buyer}.docx
-       /Seller Contracts/{Consignor}-{Contract#}.docx
-   - Fixes "stuck at Reading CSV..." by parsing CSV directly from File via Papa.parse(file, ...)
-   - Matches IDs in your latest post-auction style index.html:
-       exitBtn, pinScreen, appScreen, pinInput, pinBtn, pinMsg,
-       dropCsv, dropBuyer, dropSeller,
-       csvPicker, buyerPicker, sellerPicker,
-       csvPickBtn, buyerPickBtn, sellerPickBtn,
-       csvPill, buyerPill, sellerPill,
-       genBtn, status
+/* CMS Contract Generator — client-only
+   - PIN gate: 0623 (sessionStorage)
+   - Requires uploading: CSV + Buyer DOCX template + Seller DOCX template
+   - Generates editable .docx contracts via docxtemplater/pizzip
+   - Supports:
+       * Lot-by-lot download (buyer only / seller only)
+       * ZIP downloads: buyer-only, seller-only, or all (buyer+seller)
+       * ZIP includes selected lots (or all if none selected)
 */
 
 (() => {
-  "use strict";
-
   const CONFIG = {
     PIN: "0623",
-    ZIP_FOLDERS: {
-      buyer: "Buyer Contracts",
-      seller: "Seller Contracts",
-    },
+
+    // CSV headers (must match exactly; we validate these)
     REQUIRED_COLS: [
       "Contract #",
       "Consignor",
       "Buyer",
-      "Lot Number #2",
-      "Head Count",
+      "Lot Number #2"
     ],
-    // Your DOCX templates use {{Tag}} style
-    DELIMS: { start: "{{", end: "}}" },
+
+    // Full mapping: DOCX placeholder -> CSV column
+    MAP: {
+      contract_no: "Contract #",
+      consignor: "Consignor",
+      buyer: "Buyer",
+      lot_no: "Lot Number #2",
+      head_count: "Head Count",
+      breed: "Breed",
+      sex: "Sex",
+      base_weight: "Base Weight",
+      delivery: "Delivery",
+      year: "Year",
+      location: "Location",
+      shrink: "Shrink",
+      slide: "Slide",
+      description: "Description",
+      second_description: "Second Description",
+      price_cwt: "Calculated High Bid",
+      down_money_due: "Down Money Due"
+    },
+
+    // Column fallbacks (optional): if a preferred column is empty, try a fallback
+    FALLBACKS: {
+      lot_no: ["Lot Number", "Lot Number #2"],
+      price_cwt: ["Calculated High Bid"]
+    }
   };
 
-  // ------------------------------------------------------------
-  // IMPORTANT: Prevent the browser from "opening" dropped files
-  // ------------------------------------------------------------
-  window.addEventListener("dragover", (e) => e.preventDefault(), false);
-  window.addEventListener("drop", (e) => e.preventDefault(), false);
-
-  // ------------------------------------------------------------
-  // DOM
-  // ------------------------------------------------------------
+  // ---------- DOM ----------
   const $ = (id) => document.getElementById(id);
 
-  const pinScreen = $("pinScreen");
-  const appScreen = $("appScreen");
+  const pinOverlay = $("pinOverlay");
   const pinInput = $("pinInput");
-  const pinBtn = $("pinBtn");
-  const pinMsg = $("pinMsg");
+  const pinUnlockBtn = $("pinUnlockBtn");
+  const pinClearBtn = $("pinClearBtn");
+  const pinErr = $("pinErr");
 
+  const sessionPill = $("sessionPill");
   const exitBtn = $("exitBtn");
 
-  const dropCsv = $("dropCsv");
-  const dropBuyer = $("dropBuyer");
-  const dropSeller = $("dropSeller");
+  const csvInput = $("csvInput");
+  const buyerTplInput = $("buyerTplInput");
+  const sellerTplInput = $("sellerTplInput");
 
-  const csvPicker = $("csvPicker");
-  const buyerPicker = $("buyerPicker");
-  const sellerPicker = $("sellerPicker");
+  const csvMeta = $("csvMeta");
+  const buyerTplMeta = $("buyerTplMeta");
+  const sellerTplMeta = $("sellerTplMeta");
 
-  const csvPickBtn = $("csvPickBtn");
-  const buyerPickBtn = $("buyerPickBtn");
-  const sellerPickBtn = $("sellerPickBtn");
+  const dzCsv = $("dzCsv");
+  const dzBuyerTpl = $("dzBuyerTpl");
+  const dzSellerTpl = $("dzSellerTpl");
 
-  const csvPill = $("csvPill");
-  const buyerPill = $("buyerPill");
-  const sellerPill = $("sellerPill");
+  const validationBox = $("validationBox");
 
-  const genBtn = $("genBtn");
-  const statusEl = $("status");
+  const generateBtn = $("generateBtn");
+  const clearBtn = $("clearBtn");
 
-  // ------------------------------------------------------------
-  // Sanity: ensure required DOM exists (helps diagnose “nothing happens”)
-  // ------------------------------------------------------------
-  function assertDom() {
-    const missing = [];
-    [
-      ["pinScreen", pinScreen],
-      ["appScreen", appScreen],
-      ["pinInput", pinInput],
-      ["pinBtn", pinBtn],
-      ["pinMsg", pinMsg],
-      ["exitBtn", exitBtn],
-      ["dropCsv", dropCsv],
-      ["dropBuyer", dropBuyer],
-      ["dropSeller", dropSeller],
-      ["csvPicker", csvPicker],
-      ["buyerPicker", buyerPicker],
-      ["sellerPicker", sellerPicker],
-      ["csvPickBtn", csvPickBtn],
-      ["buyerPickBtn", buyerPickBtn],
-      ["sellerPickBtn", sellerPickBtn],
-      ["csvPill", csvPill],
-      ["buyerPill", buyerPill],
-      ["sellerPill", sellerPill],
-      ["genBtn", genBtn],
-      ["status", statusEl],
-    ].forEach(([name, el]) => {
-      if (!el) missing.push(name);
-    });
+  const zipBuyerBtn = $("zipBuyerBtn");
+  const zipSellerBtn = $("zipSellerBtn");
+  const zipAllBtn = $("zipAllBtn");
 
-    if (missing.length) {
-      console.error("Missing DOM IDs:", missing);
-      setStatus(
-        "ERROR: Missing required HTML element IDs:\n" +
-          missing.map((m) => `- ${m}`).join("\n") +
-          "\n\nFix: ensure your index.html includes these IDs exactly."
-      );
-      return false;
+  const lotCount = $("lotCount");
+  const resultsBox = $("resultsBox");
+
+  const selectAll = $("selectAll");
+  const onlyWithBuyer = $("onlyWithBuyer");
+  const onlyWithConsignor = $("onlyWithConsignor");
+
+  // ---------- State ----------
+  const state = {
+    csvFile: null,
+    csvRowsRaw: [],
+    rows: [], // normalized rows for generation
+    buyerTplFile: null,
+    sellerTplFile: null,
+    buyerTplBuf: null,
+    sellerTplBuf: null,
+
+    // Generated outputs
+    // lots: [{ id, contractNo, lotNo, buyerName, consignorName, buyerDoc: Blob|null, sellerDoc: Blob|null, buyerFilename, sellerFilename }]
+    lots: [],
+  };
+
+  // ---------- Utilities ----------
+  function setStatus(type, msg, show = true) {
+    if (!show) {
+      validationBox.style.display = "none";
+      validationBox.textContent = "";
+      validationBox.className = "status";
+      return;
     }
-    return true;
+    validationBox.style.display = "block";
+    validationBox.textContent = msg;
+    validationBox.className = `status ${type || ""}`.trim();
   }
 
-  // ------------------------------------------------------------
-  // Library checks
-  // ------------------------------------------------------------
-  function getPizZip() {
-    return window.PizZip || window.pizzip || window.Pizzip || null;
-  }
-  function getDocxtemplater() {
-    return window.docxtemplater || window.Docxtemplater || window.DocxTemplater || null;
-  }
-  function requireLibs() {
-    const missing = [];
-    if (typeof Papa === "undefined") missing.push("PapaParse (Papa) — /lib/papa.min.js");
-    if (!getPizZip()) missing.push("PizZip — /lib/pizzip.min.js");
-    if (!getDocxtemplater()) missing.push("docxtemplater — /lib/docxtemplater.min.js");
-    if (typeof JSZip === "undefined") missing.push("JSZip — /lib/jszip.min.js");
-    if (typeof saveAs === "undefined") missing.push("FileSaver (saveAs) — /lib/FileSaver.min.js");
-
-    if (missing.length) {
-      console.error("Missing libs:", missing);
-      setStatus(
-        "ERROR: Missing required libraries:\n" +
-          missing.map((m) => `- ${m}`).join("\n") +
-          "\n\nFix: confirm these script tags exist in index.html (before app.js) and filenames match exactly."
-      );
-      return false;
-    }
-    return true;
-  }
-
-  // ------------------------------------------------------------
-  // State
-  // ------------------------------------------------------------
-  let csvRows = [];
-  let buyerTemplateBytes = null; // Uint8Array
-  let sellerTemplateBytes = null; // Uint8Array
-
-  // ------------------------------------------------------------
-  // UI helpers
-  // ------------------------------------------------------------
-  function setStatus(msg) {
-    statusEl.textContent = msg;
-  }
-
-  function logLine(msg) {
-    statusEl.textContent = `${msg}\n\n${statusEl.textContent}`;
-  }
-
-  function setPill(pillEl, state, text) {
-    pillEl.classList.remove("ok", "bad", "warn");
-    pillEl.classList.add(state);
-    pillEl.textContent = text;
-  }
-
-  function refreshGenerateButton() {
-    genBtn.disabled = !(csvRows.length > 0 && buyerTemplateBytes && sellerTemplateBytes);
-  }
-
-  // ------------------------------------------------------------
-  // Filename safety
-  // ------------------------------------------------------------
-  function sanitizeFilePart(s) {
-    const str = String(s ?? "").trim();
-    if (!str) return "UNKNOWN";
-    return str
-      .replace(/[\/\\:*?"<>|]/g, "-")
+  function sanitizeFilename(name) {
+    if (!name) return "Untitled";
+    return String(name)
+      .replace(/[\/\\:*?"<>|]+/g, "-")
       .replace(/\s+/g, " ")
-      .trim()
-      .replace(/^[.\s]+|[.\s]+$/g, "");
+      .trim();
   }
 
-  function dedupeName(filename, usedSet) {
-    const lower = (x) => String(x).toLowerCase();
-    const base = filename.replace(/\.docx$/i, "");
-    let name = filename;
-    let n = 2;
-    while (usedSet.has(lower(name))) {
-      name = `${base} (${n}).docx`;
-      n++;
+  function getCell(row, colName) {
+    if (!row || !colName) return "";
+    const v = row[colName];
+    return (v === undefined || v === null) ? "" : String(v).trim();
+  }
+
+  function moneyClean(v) {
+    // Remove $ and commas; keep decimals
+    if (v === undefined || v === null) return "";
+    const s = String(v).trim();
+    if (!s) return "";
+    return s.replace(/\$/g, "").replace(/,/g, "").trim();
+  }
+
+  function normalizeData(row) {
+    // Build the object that will be passed into docxtemplater
+    const data = {};
+
+    // Base mapping
+    for (const [key, col] of Object.entries(CONFIG.MAP)) {
+      let val = getCell(row, col);
+
+      // Fallbacks if empty
+      if (!val && CONFIG.FALLBACKS[key]) {
+        for (const altCol of CONFIG.FALLBACKS[key]) {
+          val = getCell(row, altCol);
+          if (val) break;
+        }
+      }
+
+      // special cleaning
+      if (key === "price_cwt" || key === "down_money_due") val = moneyClean(val);
+
+      data[key] = val;
     }
-    usedSet.add(lower(name));
-    return name;
+
+    // Compatibility: support both {location} and {Location} placeholders
+    data.Location = data.location;
+
+    return data;
   }
 
-  // ------------------------------------------------------------
-  // Drag/drop helpers
-  // ------------------------------------------------------------
-  function preventDefaults(e) {
-    e.preventDefault();
-    e.stopPropagation();
-  }
-  function addDragUI(el, on) {
-    el.classList.toggle("dragover", !!on);
+  function requiredMissing(headers) {
+    const set = new Set(headers.map(h => String(h).trim()));
+    return CONFIG.REQUIRED_COLS.filter(req => !set.has(req));
   }
 
-  function wireDropZone(el, acceptFn) {
-    ["dragenter", "dragover", "dragleave", "drop"].forEach((evt) => {
-      el.addEventListener(evt, preventDefaults, false);
-    });
-
-    ["dragenter", "dragover"].forEach((evt) => {
-      el.addEventListener(evt, () => addDragUI(el, true), false);
-    });
-
-    ["dragleave", "drop"].forEach((evt) => {
-      el.addEventListener(evt, () => addDragUI(el, false), false);
-    });
-
-    el.addEventListener("drop", async (e) => {
-      const file = e.dataTransfer?.files?.[0];
-      if (!file) return;
-      setStatus(`Dropped file: ${file.name}`);
-      await acceptFn(file);
-    });
+  function canGenerate() {
+    return !!(state.csvRowsRaw.length && state.buyerTplBuf && state.sellerTplBuf);
   }
 
-  // ------------------------------------------------------------
-  // PIN gate
-  // ------------------------------------------------------------
+  function setGenerateEnabled() {
+    generateBtn.disabled = !canGenerate();
+  }
+
+  function setDownloadEnabled(enabled) {
+    zipBuyerBtn.disabled = !enabled;
+    zipSellerBtn.disabled = !enabled;
+    zipAllBtn.disabled = !enabled;
+  }
+
+  // ---------- PIN Gate ----------
+  function isUnlocked() {
+    return sessionStorage.getItem("cms_pin_ok") === "1";
+  }
+  function lock() {
+    sessionStorage.removeItem("cms_pin_ok");
+    sessionPill.textContent = "Locked";
+    pinOverlay.style.display = "flex";
+    pinInput.value = "";
+    pinErr.style.display = "none";
+  }
   function unlock() {
-    pinScreen.classList.add("hide");
-    appScreen.classList.remove("hide");
-    setStatus("Unlocked. Upload CSV + Buyer template + Seller template, then Generate Contracts ZIP.");
+    sessionStorage.setItem("cms_pin_ok", "1");
+    sessionPill.textContent = "Unlocked";
+    pinOverlay.style.display = "none";
   }
 
-  function handlePinSubmit() {
-    const val = String(pinInput.value || "").trim();
-    if (val === CONFIG.PIN) {
-      pinMsg.textContent = "";
+  pinUnlockBtn.addEventListener("click", () => {
+    const v = (pinInput.value || "").trim();
+    if (v === CONFIG.PIN) {
       unlock();
     } else {
-      pinMsg.textContent = "Incorrect PIN.";
-      pinMsg.style.color = "#fecaca";
+      pinErr.style.display = "block";
     }
-  }
+  });
+  pinClearBtn.addEventListener("click", () => {
+    pinInput.value = "";
+    pinErr.style.display = "none";
+    pinInput.focus();
+  });
+  pinInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") pinUnlockBtn.click();
+  });
 
-  // ------------------------------------------------------------
-  // Read file as Uint8Array for DOCX templates
-  // ------------------------------------------------------------
-  function fileToUint8Array(file) {
-    return new Promise((resolve, reject) => {
-      const r = new FileReader();
-      r.onerror = () => reject(new Error("Failed to read file."));
-      r.onabort = () => reject(new Error("File read aborted."));
-      r.onload = () => resolve(new Uint8Array(r.result));
-      r.readAsArrayBuffer(file);
+  exitBtn.addEventListener("click", () => {
+    // clear everything
+    clearSessionFiles(true);
+    lock();
+  });
+
+  // ---------- Drag & drop helpers ----------
+  function wireDropzone(zoneEl, inputEl, onFiles) {
+    zoneEl.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      zoneEl.style.borderColor = "rgba(51,102,153,.75)";
+    });
+    zoneEl.addEventListener("dragleave", () => {
+      zoneEl.style.borderColor = "rgba(51,102,153,.35)";
+    });
+    zoneEl.addEventListener("drop", (e) => {
+      e.preventDefault();
+      zoneEl.style.borderColor = "rgba(51,102,153,.35)";
+      const files = e.dataTransfer?.files;
+      if (files && files.length) onFiles(files);
+    });
+    inputEl.addEventListener("change", () => {
+      const files = inputEl.files;
+      if (files && files.length) onFiles(files);
     });
   }
 
-  // ------------------------------------------------------------
-  // CSV parsing (KEY FIX): Parse directly from File with Papa.parse(file,...)
-  // Avoids hangs from file.text() on some browsers/large files.
-  // ------------------------------------------------------------
-  function parseCsvFileWithPapa(file) {
-    return new Promise((resolve, reject) => {
-      let settled = false;
+  // ---------- CSV ----------
+  async function handleCsv(files) {
+    const f = files[0];
+    if (!f) return;
 
-      Papa.parse(file, {
-        header: true,
-        skipEmptyLines: true,
-        dynamicTyping: false,
-        // NOTE: worker:true can be flaky on some setups and requires blob workers.
-        // Keep it false for maximum compatibility.
-        worker: false,
-        complete: (results) => {
-          settled = true;
-          resolve(results);
-        },
-        error: (err) => {
-          settled = true;
-          reject(err);
-        },
-      });
+    state.csvFile = f;
+    csvMeta.textContent = `${f.name} (${Math.round(f.size/1024)} KB)`;
 
-      // Failsafe: if something truly wedges, throw a helpful error instead of “stuck”
-      setTimeout(() => {
-        if (!settled) {
-          reject(
-            new Error(
-              "CSV parse timed out. This usually means the file is extremely large or the browser is blocking file parsing."
-            )
-          );
+    setStatus("warn", "Parsing CSV…");
+
+    Papa.parse(f, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (res) => {
+        const data = res.data || [];
+        const headers = res.meta?.fields || Object.keys(data[0] || {});
+        const missing = requiredMissing(headers);
+
+        state.csvRowsRaw = data;
+
+        if (!data.length) {
+          setStatus("bad", "CSV parsed, but there are zero rows.");
+          state.csvRowsRaw = [];
+          setGenerateEnabled();
+          renderLots([]);
+          return;
         }
-      }, 30000); // 30s failsafe
+
+        if (missing.length) {
+          setStatus("bad", `CSV is missing required columns:\n- ${missing.join("\n- ")}\n\nFound columns:\n- ${headers.join("\n- ")}`);
+        } else {
+          setStatus("ok", `CSV loaded.\nRows: ${data.length}\nColumns: ${headers.length}`);
+        }
+
+        setGenerateEnabled();
+      },
+      error: (err) => {
+        setStatus("bad", `CSV parse error: ${err?.message || err}`);
+        state.csvRowsRaw = [];
+        setGenerateEnabled();
+      }
     });
   }
 
-  async function handleCsvFile(file) {
-    try {
-      setStatus(`Reading CSV: ${file.name} ...`);
-      setPill(csvPill, "warn", "Reading CSV...");
-
-      const parsed = await parseCsvFileWithPapa(file);
-
-      // surface parse errors (Papa puts some in results.errors too)
-      if (parsed.errors && parsed.errors.length) {
-        setPill(csvPill, "bad", "CSV parse error");
-        setStatus(
-          "CSV parse errors:\n" +
-            parsed.errors.slice(0, 25).map((e) => `${e.message} (row ${e.row})`).join("\n") +
-            (parsed.errors.length > 25 ? `\n... plus ${parsed.errors.length - 25} more` : "")
-        );
-        csvRows = [];
-        refreshGenerateButton();
-        return;
-      }
-
-      const headers = parsed.meta?.fields || [];
-      const missing = CONFIG.REQUIRED_COLS.filter((c) => !headers.includes(c));
-
-      if (missing.length) {
-        setPill(csvPill, "bad", "Missing columns");
-        setStatus(
-          "CSV is missing required columns:\n" +
-            missing.map((m) => `- ${m}`).join("\n") +
-            "\n\nHeaders found:\n" +
-            headers.join(", ")
-        );
-        csvRows = [];
-        refreshGenerateButton();
-        return;
-      }
-
-      const rows = (parsed.data || []).filter(
-        (r) => r && Object.values(r).some((v) => String(v ?? "").trim() !== "")
-      );
-
-      csvRows = rows;
-
-      setPill(csvPill, "ok", `${file.name} (${rows.length} rows)`);
-      setStatus(`CSV loaded: ${rows.length} rows.\nNow upload BOTH DOCX templates.`);
-      refreshGenerateButton();
-    } catch (err) {
-      console.error(err);
-      setPill(csvPill, "bad", "CSV failed");
-      setStatus("CSV read/parse failed:\n" + (err?.message || String(err)));
-      csvRows = [];
-      refreshGenerateButton();
-    }
+  // ---------- Templates ----------
+  async function readAsArrayBuffer(file) {
+    return await file.arrayBuffer();
   }
 
-  // ------------------------------------------------------------
-  // Template handlers
-  // ------------------------------------------------------------
-  async function handleBuyerTemplate(file) {
+  async function handleBuyerTpl(files) {
+    const f = files[0];
+    if (!f) return;
+    state.buyerTplFile = f;
+    buyerTplMeta.textContent = `${f.name} (${Math.round(f.size/1024)} KB)`;
+    setStatus("warn", "Loading buyer template…");
     try {
-      setStatus(`Reading Buyer template: ${file.name} ...`);
-      setPill(buyerPill, "warn", "Reading Buyer template...");
-      buyerTemplateBytes = await fileToUint8Array(file);
-      setPill(buyerPill, "ok", file.name);
-      logLine("Buyer template loaded.");
-      refreshGenerateButton();
-    } catch (err) {
-      console.error(err);
-      buyerTemplateBytes = null;
-      setPill(buyerPill, "bad", "Buyer template failed");
-      setStatus("Buyer template read failed:\n" + (err?.message || String(err)));
-      refreshGenerateButton();
+      state.buyerTplBuf = await readAsArrayBuffer(f);
+      setStatus("ok", "Buyer template loaded.");
+    } catch (e) {
+      state.buyerTplBuf = null;
+      setStatus("bad", `Buyer template load failed: ${e?.message || e}`);
     }
+    setGenerateEnabled();
   }
 
-  async function handleSellerTemplate(file) {
+  async function handleSellerTpl(files) {
+    const f = files[0];
+    if (!f) return;
+    state.sellerTplFile = f;
+    sellerTplMeta.textContent = `${f.name} (${Math.round(f.size/1024)} KB)`;
+    setStatus("warn", "Loading seller template…");
     try {
-      setStatus(`Reading Seller template: ${file.name} ...`);
-      setPill(sellerPill, "warn", "Reading Seller template...");
-      sellerTemplateBytes = await fileToUint8Array(file);
-      setPill(sellerPill, "ok", file.name);
-      logLine("Seller template loaded.");
-      refreshGenerateButton();
-    } catch (err) {
-      console.error(err);
-      sellerTemplateBytes = null;
-      setPill(sellerPill, "bad", "Seller template failed");
-      setStatus("Seller template read failed:\n" + (err?.message || String(err)));
-      refreshGenerateButton();
+      state.sellerTplBuf = await readAsArrayBuffer(f);
+      setStatus("ok", "Seller template loaded.");
+    } catch (e) {
+      state.sellerTplBuf = null;
+      setStatus("bad", `Seller template load failed: ${e?.message || e}`);
     }
+    setGenerateEnabled();
   }
 
-  // ------------------------------------------------------------
-  // DOCX render
-  // ------------------------------------------------------------
-  function renderDocxFromTemplate(templateBytes, dataObj) {
-    const PizZipRef = getPizZip();
-    const DocxRef = getDocxtemplater();
-
-    // clone: docxtemplater mutates zip state
-    const bytes = templateBytes.slice(0);
-
-    const zip = new PizZipRef(bytes);
-    const doc = new DocxRef(zip, {
+  // ---------- DOCX generation ----------
+  function renderDocx(templateArrayBuffer, data) {
+    // pizzip expects binary string/uint8; arrayBuffer is okay when wrapped
+    const zip = new PizZip(templateArrayBuffer);
+    const doc = new window.docxtemplater(zip, {
       paragraphLoop: true,
-      linebreaks: true,
-      delimiters: CONFIG.DELIMS, // {{Tag}}
+      linebreaks: true
     });
 
-    doc.render(dataObj);
-    return doc.getZip().generate({ type: "blob" });
+    doc.setData(data);
+
+    try {
+      doc.render();
+    } catch (error) {
+      // Give useful docxtemplater error output
+      const e = error;
+      const explanation =
+        (e.properties && e.properties.errors)
+          ? e.properties.errors.map(er => er.properties?.explanation).filter(Boolean).join("\n")
+          : (e.message || String(e));
+
+      throw new Error(`Template render failed.\n${explanation}`);
+    }
+
+    const out = doc.getZip().generate({
+      type: "blob",
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    });
+
+    return out;
   }
 
-  // ------------------------------------------------------------
-  // Generate ZIP
-  // ------------------------------------------------------------
-  async function generateZip() {
-    if (!(csvRows.length > 0 && buyerTemplateBytes && sellerTemplateBytes)) {
-      setStatus("Upload CSV + Buyer template + Seller template first.");
+  // ---------- Generation pipeline ----------
+  function buildLotsFromCsv() {
+    const lots = [];
+    const rows = state.csvRowsRaw;
+
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+
+      const contractNo = getCell(r, "Contract #");
+      const lotNo = getCell(r, "Lot Number #2") || getCell(r, "Lot Number");
+      const buyerName = getCell(r, "Buyer");
+      const consignorName = getCell(r, "Consignor");
+
+      // Skip rows that are totally empty
+      if (!contractNo && !lotNo && !buyerName && !consignorName) continue;
+
+      const sellerFilename = sanitizeFilename(`${consignorName || "Consignor"}-${contractNo || "Contract"}.docx`);
+      const buyerFilename = sanitizeFilename(`${contractNo || "Contract"}-${buyerName || "Buyer"}.docx`);
+
+      lots.push({
+        id: `${contractNo || "NA"}__${lotNo || i}__${i}`,
+        idx: i + 1,
+        contractNo,
+        lotNo,
+        buyerName,
+        consignorName,
+        selected: false,
+
+        // Generated docs
+        buyerDoc: null,
+        sellerDoc: null,
+
+        buyerFilename,
+        sellerFilename,
+
+        // Data object used for rendering
+        data: normalizeData(r)
+      });
+    }
+
+    return lots;
+  }
+
+  async function generateAll() {
+    if (!canGenerate()) return;
+
+    // Validate required columns present before generating
+    // (We already did basic check, but enforce hard stop if missing)
+    const headers = Object.keys(state.csvRowsRaw[0] || {});
+    const missing = requiredMissing(headers);
+    if (missing.length) {
+      setStatus("bad", `Cannot generate because CSV is missing required columns:\n- ${missing.join("\n- ")}`);
       return;
     }
 
-    setStatus("Generating DOCX files and building ZIP...");
-    genBtn.disabled = true;
+    setStatus("warn", "Generating contracts…");
 
-    const zip = new JSZip();
-    const buyerFolder = zip.folder(CONFIG.ZIP_FOLDERS.buyer);
-    const sellerFolder = zip.folder(CONFIG.ZIP_FOLDERS.seller);
+    const lots = buildLotsFromCsv();
+    if (!lots.length) {
+      setStatus("bad", "No usable rows found to generate.");
+      renderLots([]);
+      setDownloadEnabled(false);
+      return;
+    }
 
-    const usedNames = new Set();
-    let okRows = 0;
-    let failRows = 0;
+    let ok = 0;
+    const errors = [];
 
-    for (let i = 0; i < csvRows.length; i++) {
-      const row = csvRows[i];
+    // Generate sequentially to keep memory stable (and better error messages)
+    for (let i = 0; i < lots.length; i++) {
+      const lot = lots[i];
 
       try {
-        // Your templates use both {{Shrink}} and seller uses {{shrink}}.
-        const data = {
-          ...row,
-          Shrink: row["Shrink"],
-          shrink: row["Shrink"],
-        };
+        // Buyer
+        lot.buyerDoc = renderDocx(state.buyerTplBuf, lot.data);
 
-        const contractNo = sanitizeFilePart(row["Contract #"]);
-        const buyerName = sanitizeFilePart(row["Buyer"]);
-        const consignor = sanitizeFilePart(row["Consignor"]);
+        // Seller
+        lot.sellerDoc = renderDocx(state.sellerTplBuf, lot.data);
 
-        // Naming rules YOU specified:
-        // Seller: Consignor Name-Contract Number
-        // Buyer : Contract Number-Buyer Name
-        let sellerFile = `${consignor}-${contractNo}.docx`;
-        let buyerFile = `${contractNo}-${buyerName}.docx`;
-
-        sellerFile = dedupeName(sellerFile, usedNames);
-        buyerFile = dedupeName(buyerFile, usedNames);
-
-        const buyerBlob = renderDocxFromTemplate(buyerTemplateBytes, data);
-        const sellerBlob = renderDocxFromTemplate(sellerTemplateBytes, data);
-
-        buyerFolder.file(buyerFile, buyerBlob);
-        sellerFolder.file(sellerFile, sellerBlob);
-
-        okRows++;
-      } catch (err) {
-        failRows++;
-        logLine(`Row ${i + 1} failed: ${err?.message || String(err)}`);
+        ok++;
+      } catch (e) {
+        errors.push(`Row ${lot.idx} (Contract # ${lot.contractNo || "?"}, Lot ${lot.lotNo || "?"}): ${e.message || e}`);
+        // continue generating other lots
       }
     }
 
-    const zipName = `CMS Contracts - ${new Date().toISOString().slice(0, 10)}.zip`;
+    state.lots = lots;
+    renderLots(lots);
+    setDownloadEnabled(ok > 0);
 
-    try {
-      const outBlob = await zip.generateAsync({ type: "blob" });
-      saveAs(outBlob, zipName);
+    if (errors.length) {
+      setStatus("warn", `Generated ${ok} / ${lots.length} lots.\n\nErrors:\n- ${errors.slice(0, 12).join("\n- ")}${errors.length > 12 ? `\n…plus ${errors.length - 12} more` : ""}`);
+    } else {
+      setStatus("ok", `Generated ${ok} / ${lots.length} lots.\nYou can now download lot-by-lot or ZIP.`);
+    }
+  }
 
-      setStatus(
-        `Done.\n` +
-          `Rows processed: ${csvRows.length}\n` +
-          `Rows succeeded: ${okRows}\n` +
-          `Rows failed: ${failRows}\n` +
-          `Contracts generated: ${okRows * 2} (Buyer+Seller per successful row)\n\n` +
-          `Downloaded: ${zipName}\n\n` +
-          (failRows ? "Scroll status log for row-level errors." : "No errors.")
-      );
-    } catch (err) {
-      console.error(err);
-      setStatus("ZIP build failed:\n" + (err?.message || String(err)));
+  // ---------- Results UI ----------
+  function getFilteredLots() {
+    let lots = [...state.lots];
+
+    if (onlyWithBuyer.checked) {
+      lots = lots.filter(l => (l.buyerName || "").trim().length > 0);
+    }
+    if (onlyWithConsignor.checked) {
+      lots = lots.filter(l => (l.consignorName || "").trim().length > 0);
     }
 
-    refreshGenerateButton();
+    return lots;
   }
 
-  // ------------------------------------------------------------
-  // Wire events
-  // ------------------------------------------------------------
-  function wireEvents() {
-    // PIN
-    pinBtn.addEventListener("click", handlePinSubmit);
-    pinInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") handlePinSubmit();
+  function renderLots(lotsInput) {
+    const lots = lotsInput || [];
+    lotCount.textContent = String(lots.length);
+
+    if (!lots.length) {
+      resultsBox.innerHTML = `<div class="lotrow"><div class="small">No generated lots yet.</div></div>`;
+      return;
+    }
+
+    const lotsToShow = getFilteredLots();
+
+    const html = lotsToShow.map(lot => {
+      const buyerOk = !!lot.buyerDoc;
+      const sellerOk = !!lot.sellerDoc;
+
+      const left = `
+        <div class="c1">
+          <input type="checkbox" data-id="${lot.id}" class="lotSelect" ${lot.selected ? "checked" : ""} />
+        </div>
+      `;
+
+      const c2 = `
+        <div class="c2">
+          <div><b class="mono">${escapeHtml(lot.contractNo || "—")}</b> <span class="small">• Lot</span> <b class="mono">${escapeHtml(lot.lotNo || "—")}</b></div>
+          <div class="small">Row ${lot.idx}</div>
+        </div>
+      `;
+
+      const c3 = `
+        <div class="c3">
+          <div class="small">Buyer</div>
+          <div>${escapeHtml(lot.buyerName || "—")}</div>
+        </div>
+      `;
+
+      const c4 = `
+        <div class="c4">
+          <div class="small">Consignor</div>
+          <div>${escapeHtml(lot.consignorName || "—")}</div>
+        </div>
+      `;
+
+      const c5 = `
+        <div class="c5 actions">
+          <button class="btn" data-action="dlBuyer" data-id="${lot.id}" ${buyerOk ? "" : "disabled"}>Download Buyer</button>
+          <button class="btn" data-action="dlSeller" data-id="${lot.id}" ${sellerOk ? "" : "disabled"}>Download Seller</button>
+        </div>
+      `;
+
+      return `<div class="lotrow">${left}${c2}${c3}${c4}${c5}</div>`;
+    }).join("");
+
+    resultsBox.innerHTML = html;
+
+    // wire events
+    resultsBox.querySelectorAll(".lotSelect").forEach(cb => {
+      cb.addEventListener("change", (e) => {
+        const id = e.target.getAttribute("data-id");
+        const lot = state.lots.find(x => x.id === id);
+        if (lot) lot.selected = e.target.checked;
+        syncSelectAllCheckbox();
+      });
     });
 
-    // Exit/Clear = reload (clears memory)
-    exitBtn.addEventListener("click", () => window.location.reload());
+    resultsBox.querySelectorAll("button[data-action]").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        const action = e.target.getAttribute("data-action");
+        const id = e.target.getAttribute("data-id");
+        const lot = state.lots.find(x => x.id === id);
+        if (!lot) return;
 
-    // Drag/drop zones
-    wireDropZone(dropCsv, async (file) => {
-      if (!file.name.toLowerCase().endsWith(".csv")) {
-        setPill(csvPill, "bad", "Not a CSV");
-        setStatus("That file is not a .csv. Please drop the auction results CSV.");
-        return;
-      }
-      await handleCsvFile(file);
+        if (action === "dlBuyer") downloadOne(lot, "buyer");
+        if (action === "dlSeller") downloadOne(lot, "seller");
+      });
     });
 
-    wireDropZone(dropBuyer, async (file) => {
-      if (!file.name.toLowerCase().endsWith(".docx")) {
-        setPill(buyerPill, "bad", "Not a DOCX");
-        setStatus("Buyer template must be a .docx file.");
-        return;
-      }
-      await handleBuyerTemplate(file);
-    });
-
-    wireDropZone(dropSeller, async (file) => {
-      if (!file.name.toLowerCase().endsWith(".docx")) {
-        setPill(sellerPill, "bad", "Not a DOCX");
-        setStatus("Seller template must be a .docx file.");
-        return;
-      }
-      await handleSellerTemplate(file);
-    });
-
-    // Choose file buttons
-    csvPickBtn.addEventListener("click", () => csvPicker.click());
-    buyerPickBtn.addEventListener("click", () => buyerPicker.click());
-    sellerPickBtn.addEventListener("click", () => sellerPicker.click());
-
-    // Pickers
-    csvPicker.addEventListener("change", async (e) => {
-      const f = e.target.files?.[0];
-      if (f) await handleCsvFile(f);
-      e.target.value = "";
-    });
-
-    buyerPicker.addEventListener("change", async (e) => {
-      const f = e.target.files?.[0];
-      if (f) await handleBuyerTemplate(f);
-      e.target.value = "";
-    });
-
-    sellerPicker.addEventListener("change", async (e) => {
-      const f = e.target.files?.[0];
-      if (f) await handleSellerTemplate(f);
-      e.target.value = "";
-    });
-
-    // Generate
-    genBtn.addEventListener("click", generateZip);
+    syncSelectAllCheckbox();
   }
 
-  // ------------------------------------------------------------
-  // Init
-  // ------------------------------------------------------------
+  function escapeHtml(str) {
+    return String(str || "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  function syncSelectAllCheckbox() {
+    const visible = getFilteredLots();
+    if (!visible.length) {
+      selectAll.checked = false;
+      selectAll.indeterminate = false;
+      return;
+    }
+    const selectedCount = visible.filter(l => l.selected).length;
+    selectAll.checked = selectedCount === visible.length;
+    selectAll.indeterminate = selectedCount > 0 && selectedCount < visible.length;
+  }
+
+  selectAll.addEventListener("change", () => {
+    const visible = getFilteredLots();
+    visible.forEach(l => l.selected = selectAll.checked);
+    renderLots(state.lots);
+  });
+
+  onlyWithBuyer.addEventListener("change", () => renderLots(state.lots));
+  onlyWithConsignor.addEventListener("change", () => renderLots(state.lots));
+
+  // ---------- Download helpers ----------
+  function selectedOrAllLots() {
+    const selected = state.lots.filter(l => l.selected);
+    return selected.length ? selected : state.lots;
+  }
+
+  function downloadOne(lot, which) {
+    if (which === "buyer") {
+      if (!lot.buyerDoc) return;
+      saveAs(lot.buyerDoc, lot.buyerFilename);
+    } else if (which === "seller") {
+      if (!lot.sellerDoc) return;
+      saveAs(lot.sellerDoc, lot.sellerFilename);
+    }
+  }
+
+  async function downloadZip(mode) {
+    // mode: "buyer" | "seller" | "all"
+    const lots = selectedOrAllLots().filter(l => {
+      if (mode === "buyer") return !!l.buyerDoc;
+      if (mode === "seller") return !!l.sellerDoc;
+      return !!l.buyerDoc || !!l.sellerDoc;
+    });
+
+    if (!lots.length) {
+      setStatus("bad", "No contracts available for that download mode (check your selection/filters).");
+      return;
+    }
+
+    setStatus("warn", "Building ZIP…");
+
+    const zip = new JSZip();
+    const stamp = new Date();
+    const yyyy = stamp.getFullYear();
+    const mm = String(stamp.getMonth() + 1).padStart(2, "0");
+    const dd = String(stamp.getDate()).padStart(2, "0");
+    const dateTag = `${yyyy}-${mm}-${dd}`;
+
+    const buyerFolder = zip.folder("Buyer Contracts");
+    const sellerFolder = zip.folder("Seller Contracts");
+
+    for (const lot of lots) {
+      if ((mode === "buyer" || mode === "all") && lot.buyerDoc) {
+        buyerFolder.file(lot.buyerFilename, lot.buyerDoc);
+      }
+      if ((mode === "seller" || mode === "all") && lot.sellerDoc) {
+        sellerFolder.file(lot.sellerFilename, lot.sellerDoc);
+      }
+    }
+
+    // If mode is buyer-only, remove seller folder if empty; same for seller-only
+    if (mode === "buyer") zip.remove("Seller Contracts");
+    if (mode === "seller") zip.remove("Buyer Contracts");
+
+    const blob = await zip.generateAsync({ type: "blob" });
+
+    const zipName =
+      mode === "buyer" ? `Buyer_Contracts_${dateTag}.zip` :
+      mode === "seller" ? `Seller_Contracts_${dateTag}.zip` :
+      `All_Contracts_${dateTag}.zip`;
+
+    saveAs(blob, zipName);
+    setStatus("ok", `ZIP downloaded: ${zipName}`);
+  }
+
+  zipBuyerBtn.addEventListener("click", () => downloadZip("buyer"));
+  zipSellerBtn.addEventListener("click", () => downloadZip("seller"));
+  zipAllBtn.addEventListener("click", () => downloadZip("all"));
+
+  // ---------- Clear session ----------
+  function clearSessionFiles(silent=false) {
+    state.csvFile = null;
+    state.csvRowsRaw = [];
+    state.rows = [];
+
+    state.buyerTplFile = null;
+    state.sellerTplFile = null;
+    state.buyerTplBuf = null;
+    state.sellerTplBuf = null;
+
+    state.lots = [];
+
+    csvInput.value = "";
+    buyerTplInput.value = "";
+    sellerTplInput.value = "";
+
+    csvMeta.textContent = "No file selected";
+    buyerTplMeta.textContent = "No template selected";
+    sellerTplMeta.textContent = "No template selected";
+
+    setGenerateEnabled();
+    setDownloadEnabled(false);
+    renderLots([]);
+
+    if (!silent) setStatus("ok", "Session cleared. Re-upload CSV and templates to generate again.");
+  }
+
+  clearBtn.addEventListener("click", () => clearSessionFiles());
+
+  // ---------- Wire dropzones ----------
+  wireDropzone(dzCsv, csvInput, handleCsv);
+  wireDropzone(dzBuyerTpl, buyerTplInput, handleBuyerTpl);
+  wireDropzone(dzSellerTpl, sellerTplInput, handleSellerTpl);
+
+  // ---------- Generate ----------
+  generateBtn.addEventListener("click", generateAll);
+
+  // ---------- Init ----------
   function init() {
-    if (!assertDom()) return;
-    if (!requireLibs()) return;
+    renderLots([]);
+    setDownloadEnabled(false);
+    setGenerateEnabled();
 
-    setPill(csvPill, "warn", "No CSV loaded");
-    setPill(buyerPill, "warn", "No Buyer template loaded");
-    setPill(sellerPill, "warn", "No Seller template loaded");
-    refreshGenerateButton();
-
-    setStatus("Locked. Enter PIN to begin.");
-    console.log("CMS Contract Generator loaded.");
-    wireEvents();
+    if (isUnlocked()) {
+      unlock();
+    } else {
+      lock();
+    }
   }
 
   init();
